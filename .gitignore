@@ -1,0 +1,26 @@
+# --- SEGURIDAD ---
+.env
+instagram_session/
+
+# --- ARCHIVOS DE EXCEL ---
+# Ignorar todos los Excel
+*.xlsx
+*.xls
+*.csv
+
+# EXCEPCIÓN: Permitir solo el formato de ejemplo
+!excel_formato.xlsx
+
+# --- SCRIPTS DE PYTHON ---
+# Ignorar todos los archivos .py para que no se suban pruebas
+*.py
+
+# EXCEPCIÓN: Permitir solo tu archivo principal
+!main.py
+
+# --- BASURA DEL SISTEMA ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
