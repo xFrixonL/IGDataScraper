@@ -14,8 +14,8 @@ GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 # Verificación de seguridad básica
 if not GROQ_API_KEY:
     raise ValueError("¡Error! No se encontró GROQ_API_KEY en el archivo .env")
-EXCEL_ENTRADA = "archivo.xlsx"
-EXCEL_SALIDA = "resultado_archivo.xlsx"
+EXCEL_ENTRADA = "excel_formato.xlsx"
+EXCEL_SALIDA = "resultado_excel_formato.xlsx"
 USER_DATA_DIR = "./instagram_session" 
 
 client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
@@ -24,31 +24,32 @@ async def procesar_con_groq(nombre, info_contexto, lista_posts):
     contexto_posts = "\n".join([f"- {p[:300]}" for p in lista_posts if p])
     
     prompt = f"""
-    Redacta una descripción corporativa técnica y directa para un directorio profesional de esta cuenta de Instagram.
+    Redacta una descripción corporativa técnica y directa para un directorio profesional sobre esta cuenta de instagram.
     
     ENTIDAD: {nombre} 
-    CONTEXTO: {info_contexto} 
-    CONTENIDO ANALIZADO: {contexto_posts}
+    CONTEXTO (Bio/Ubicación): {info_contexto} 
+    TENDENCIAS RECIENTES (Usa solo para inferir el rubro): {contexto_posts}
     
     REGLAS:
     1. LONGITUD: Estrictamente entre 300 y 400 caracteres.
-    2. ESTILO: Redacción en PROSA CONTINUA (un solo párrafo fluido). No uses listas, ni etiquetas como 'Sector:' o 'Servicios:'.
-    3. TONO: Empieza directo con la actividad de la entidad. Usa un lenguaje ejecutivo y asertivo.
-    4. PROHIBICIONES: No digas "parece ser", "esta cuenta", "en Instagram", "según sus posts", "bio" o "links". 
-    5. CONTENIDO: Define el sector, servicios y enfoque estratégico integrados en el texto.
+    2. ESTILO: Redacción en PROSA CONTINUA. Sin listas ni etiquetas.
+    3. TONO: Ejecutivo y asertivo. Empieza directo con la actividad.
+    4. ENFOQUE: No te limites a los temas de los posts recientes; úsalos solo para identificar el SECTOR profesional. La descripción debe definir la IDENTIDAD GENERAL de la entidad.
+    5. PROHIBICIONES: No menciones temas específicos de los posts como si fueran lo único que hace. No digas "parece ser", "en Instagram" o "recientemente".
     6. IDIOMA: Español.
 
     ENTREGA JSON:
     {{
       "pais": "ISO-3166-1 ALPHA-3",
-      "descripcion": "Descripción asertiva de 250 a 300 caracteres aquí."
+      "descripcion": "Descripción generalista y profesional de 300-400 caracteres aquí."
     }}
     """
     try:
         response = client.chat.completions.create(
+            # model="llama-3.1-8b-instant"
             model="llama-3.3-70b-versatile",
             messages=[
-                {"role": "system", "content": "Eres un redactor de élite para revistas de negocios. Tu estilo es sobrio, asertivo y redactas párrafos profesionales sin usar esquemas de puntos."},
+                {"role": "system", "content": "Eres un analista de mercado experto. Tu misión es sintetizar la identidad de una entidad basándote en su presencia digital, evitando caer en descripciones anecdóticas de sus últimas publicaciones."},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3
@@ -56,10 +57,9 @@ async def procesar_con_groq(nombre, info_contexto, lista_posts):
         texto = response.choices[0].message.content.strip()
         inicio, fin = texto.find('{'), texto.rfind('}') + 1
         res = json.loads(texto[inicio:fin])
-        
         return res
     except:
-        return {"pais": "POR DEFINIR", "descripcion": "POR DEFINIR"}
+        return {"pais": "POR DEFINIR", "descripcion": "Error en síntesis de información"}
 
 async def ejecutar():
 
@@ -139,48 +139,78 @@ async def ejecutar():
                 try: ubi_bio = await page.locator("h1._ap3a._aaco._aacu._aacy._aad6._aade").inner_text()
                 except: ubi_bio = ""
 
-                # 4. MUESTREO DE 4 POSTS (Para saltar PINS)
+                # 4. MUESTREO DE 4 POSTS (Selector Universal de Instagram)
                 await page.mouse.wheel(0, 500)
-                await page.wait_for_timeout(1500)
+                await page.wait_for_timeout(2000)
                 
-                fechas_encontradas = []
                 captions = []
-                posts_locators = page.locator("a[href*='/p/']")
-                total_posts = await posts_locators.count()
+                fechas_encontradas = []
+                
+                # Este selector es la clave: busca cualquier link que sea un post, un reel o video
+                # El "singular" /reel/ era lo que nos faltaba
+                posts_selector = "a[href*='/p/'], a[href*='/reel/']"
+                posts_links = page.locator(posts_selector)
+                
+                # IMPORTANTE: Instagram a veces pone links ocultos, filtramos por los que tienen imagen
+                imagenes_posts = posts_links.locator("img")
+                count = await posts_links.count()
 
-                if total_posts == 0:
-                    df.at[i, 'eliminar'], df.at[i, 'observaciones'] = "SI", "Sin publicaciones"
+                if count == 0:
+                    df.at[i, 'eliminar'], df.at[i, 'observaciones'] = "SI", "Sin publicaciones visibles"
                 else:
-                    for j in range(min(4, total_posts)):
+                    # A. Extraer textos vía ALT (Rápido y sin clics)
+                    for j in range(min(4, count)):
                         try:
-                            await posts_locators.nth(j).click()
+                            alt = await imagenes_posts.nth(j).get_attribute("alt")
+                            if alt: captions.append(alt)
+                        except: pass
+
+                    # B. Verificar fechas (Entrando con cuidado)
+                    cuenta_activa = False
+                    for j in range(min(4, count)):
+                        try:
+                            # 1. Hacemos scroll al post para que Instagram lo "active"
+                            target_post = posts_links.nth(j)
+                            await target_post.scroll_into_view_if_needed()
+                            await page.wait_for_timeout(500)
+                            
+                            # 2. Clic para abrir el diálogo
+                            await target_post.click()
+                            
+                            # 3. Esperar que el tag 'time' aparezca
+                            # Si es un REEL, a veces el diálogo tarda más, subimos a 8s
                             await page.wait_for_selector("time", timeout=5000)
-                            f_iso = await page.locator("time").first.get_attribute("datetime")
-                            fechas_encontradas.append(datetime.fromisoformat(f_iso.split('T')[0]))
                             
-                            cap = await page.locator("div[role='dialog'] span").first.inner_text()
-                            captions.append(cap)
+                            elemento_tiempo = page.locator("time").first
+                            f_iso = await elemento_tiempo.get_attribute("datetime")
                             
+                            if f_iso:
+                                fecha_p = datetime.fromisoformat(f_iso.split('T')[0])
+                                fechas_encontradas.append(fecha_p)
+                                
+                                # Cerrar diálogo
+                                await page.keyboard.press("Escape")
+                                await page.wait_for_timeout(800)
+
+                                if fecha_p >= FECHA_LIMITE:
+                                    cuenta_activa = True
+                                    break 
+                        except Exception as e:
+                            # Si falla, cerramos lo que haya abierto y seguimos
                             await page.keyboard.press("Escape")
                             await page.wait_for_timeout(500)
-                        except: continue
+                            continue
 
                     # 5. DECISIÓN FINAL
-                    if not fechas_encontradas:
-                        df.at[i, 'eliminar'], df.at[i, 'observaciones'] = "SI", "Error lectura posts"
+                    if not cuenta_activa:
+                        txt_f = f"Inactiva (Reciente: {max(fechas_encontradas).date()})" if fechas_encontradas else "Inactiva (Sin fechas leídas)"
+                        df.at[i, 'eliminar'], df.at[i, 'observaciones'] = "SI", txt_f
                     else:
-                        fecha_mas_joven = max(fechas_encontradas)
-                        if fecha_mas_joven < FECHA_LIMITE:
-                            df.at[i, 'eliminar'] = "SI"
-                            df.at[i, 'observaciones'] = f"Inactiva (Reciente: {fecha_mas_joven.date()})"
-                        else:
-                            df.at[i, 'eliminar'], df.at[i, 'observaciones'] = "NO", ""
-                            # Enviamos todo el contexto a la IA
-                            info_contexto = f"PAÍS OFICIAL: {pais_oficial} | BIO: {bio_txt} | UBI BIO: {ubi_bio}"
-                            res_ia = await procesar_con_groq(row['name'], info_contexto, captions)
-                            
-                            df.at[i, 'pais'] = res_ia.get('pais', 'POR DEFINIR')
-                            df.at[i, 'descripción'] = res_ia.get('descripcion', bio_txt)
+                        df.at[i, 'eliminar'], df.at[i, 'observaciones'] = "NO", ""
+                        info_ctx = f"PAÍS: {pais_oficial} | BIO: {bio_txt} | UBI: {ubi_bio}"
+                        res_ia = await procesar_con_groq(row['name'], info_ctx, captions)
+                        df.at[i, 'pais'] = res_ia.get('pais', 'POR DEFINIR')
+                        df.at[i, 'descripción'] = res_ia.get('descripcion', bio_txt)
 
             except Exception as e:
                 df.at[i, 'eliminar'], df.at[i, 'observaciones'] = "SI", "Error carga"
